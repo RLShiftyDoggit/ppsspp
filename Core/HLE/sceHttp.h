@@ -239,6 +239,27 @@ public:
 	HTTPConnection(int templateID, const char* hostString, const char* scheme, u32 port, int enableKeepalive);
 	virtual ~HTTPConnection() = default;
 
+	// FTB3 (UCUS-98716) builds its SVO HTTPS endpoint as HTTP port + 1.
+	// PPSSPP's sceHttp transport is plaintext, so preserve the HTTPS scheme visible
+	// to the game while routing the canonical FTB3 SVO host's 10061 transport to
+	// the existing plaintext companion service on 10060.
+	HTTPConnection& operator=(const HTTPConnection& other) {
+		if (this == &other)
+			return *this;
+
+		HTTPTemplate::operator=(other);
+		templateID = other.templateID;
+		hostString = other.hostString;
+		scheme = other.scheme;
+		port = other.port;
+		enableKeepalive = other.enableKeepalive;
+
+		if (scheme == "https" && port == 10061 && hostString == "ftb3.psp.online.scea.com")
+			port = 10060;
+
+		return *this;
+	}
+
 	virtual const char* className() override { return name_HTTPConnection; }
 
 	int getTemplateID() { return templateID; }
