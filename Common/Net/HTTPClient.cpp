@@ -380,7 +380,7 @@ int Client::SendRequestWithData(const char *method, const RequestParams &req, st
 		"\r\n";
 
 	buffer.Printf(tpl,
-		method, req.resource.c_str(), HTTP_VERSION,
+		method, req.resource.c_str(), httpVersion_,
 		host_.c_str(),
 		userAgent_.c_str(),
 		req.acceptMime,
