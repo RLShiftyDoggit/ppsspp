@@ -5,12 +5,22 @@
 #include "Core/MIPS/MIPS.h"
 #include "Common/Log.h"
 
+#include <deque>
 #include <mutex>
 
 SocketManager g_socketManager;
 static std::mutex g_socketMutex;  // TODO: Remove once the adhoc thread is gone
 
-static bool IsFTB3LegacyTLSPeer(SOCKET sock, int *peerPort) {
+struct FTB3SocketAccessEntry {
+	const char *event = nullptr;
+	u32 pc = 0;
+	int threadId = 0;
+	int peerPort = 0;
+};
+
+static std::deque<FTB3SocketAccessEntry> g_ftb3SocketHistory[256];
+
+static int GetSocketPeerPort(SOCKET sock) {
 	sockaddr_storage peer{};
 #if PPSSPP_PLATFORM(WINDOWS)
 	int peerLen = static_cast<int>(sizeof(peer));
@@ -18,20 +28,59 @@ static bool IsFTB3LegacyTLSPeer(SOCKET sock, int *peerPort) {
 	socklen_t peerLen = static_cast<socklen_t>(sizeof(peer));
 #endif
 	if (getpeername(sock, reinterpret_cast<sockaddr *>(&peer), &peerLen) != 0)
-		return false;
+		return 0;
 
-	int port = 0;
-	if (peer.ss_family == AF_INET) {
-		port = ntohs(reinterpret_cast<const sockaddr_in *>(&peer)->sin_port);
-	}
+	if (peer.ss_family == AF_INET)
+		return ntohs(reinterpret_cast<const sockaddr_in *>(&peer)->sin_port);
 #if defined(AF_INET6)
-	else if (peer.ss_family == AF_INET6) {
-		port = ntohs(reinterpret_cast<const sockaddr_in6 *>(&peer)->sin6_port);
-	}
+	if (peer.ss_family == AF_INET6)
+		return ntohs(reinterpret_cast<const sockaddr_in6 *>(&peer)->sin6_port);
 #endif
+	return 0;
+}
+
+static bool IsFTB3LegacyTLSPeer(SOCKET sock, int *peerPort) {
+	const int port = GetSocketPeerPort(sock);
 	if (peerPort)
 		*peerPort = port;
 	return port == 10061;
+}
+
+static void RecordFTB3SocketAccess(const char *event, int pspSocket, SOCKET hostSocket) {
+	if (pspSocket < 0 || pspSocket >= 256)
+		return;
+
+	FTB3SocketAccessEntry entry;
+	entry.event = event;
+	entry.pc = currentMIPS ? currentMIPS->pc : 0;
+	entry.threadId = sceKernelGetThreadId();
+	entry.peerPort = GetSocketPeerPort(hostSocket);
+
+	auto &history = g_ftb3SocketHistory[pspSocket];
+	history.push_back(entry);
+	while (history.size() > 32)
+		history.pop_front();
+}
+
+static void DumpFTB3SocketHistory(int pspSocket, SOCKET hostSocket) {
+	if (pspSocket < 0 || pspSocket >= 256)
+		return;
+
+	const int peerPort = GetSocketPeerPort(hostSocket);
+	if (peerPort != 10061)
+		return;
+
+	const auto &history = g_ftb3SocketHistory[pspSocket];
+	ERROR_LOG(Log::sceNet,
+		"[FTB3 WIRE] HISTORY_BEGIN pspSocket=%d hostSocket=%llu entries=%zu peerPort=%d",
+		pspSocket, static_cast<unsigned long long>(hostSocket), history.size(), peerPort);
+	for (size_t i = 0; i < history.size(); ++i) {
+		const auto &entry = history[i];
+		ERROR_LOG(Log::sceNet,
+			"[FTB3 WIRE] HISTORY[%02zu] event=%s pc=%08x thread=%d peerPortAtCall=%d",
+			i, entry.event ? entry.event : "?", entry.pc, entry.threadId, entry.peerPort);
+	}
+	ERROR_LOG(Log::sceNet, "[FTB3 WIRE] HISTORY_END pspSocket=%d", pspSocket);
 }
 
 static void TraceFTB3RawSocket(const char *event, int pspSocket, SOCKET hostSocket) {
@@ -78,6 +127,8 @@ InetSocket *SocketManager::CreateSocket(int *index, int *returned_errno, SocketS
 			inetSock->protocol = protocol;
 			inetSock->nonblocking = false;
 			*returned_errno = 0;
+			g_ftb3SocketHistory[i].clear();
+			RecordFTB3SocketAccess("CREATE", i, hostSock);
 			return inetSock;
 		}
 	}
@@ -103,6 +154,8 @@ InetSocket *SocketManager::AdoptSocket(int *index, SOCKET hostSocket, const Inet
 			inetSock->type = derive->type;
 			inetSock->protocol = derive->protocol;
 			inetSock->nonblocking = derive->nonblocking;  // should we inherit blocking state?
+			g_ftb3SocketHistory[i].clear();
+			RecordFTB3SocketAccess("ADOPT", i, hostSocket);
 			return inetSock;
 		}
 	}
@@ -122,6 +175,8 @@ bool SocketManager::Close(InetSocket *inetSocket) {
 			break;
 		}
 	}
+	RecordFTB3SocketAccess("CLOSE_REQUEST", pspSocket, inetSocket->sock);
+	DumpFTB3SocketHistory(pspSocket, inetSocket->sock);
 	TraceFTB3RawSocket("CLOSE", pspSocket, inetSocket->sock);
 
 	if (closesocket(inetSocket->sock) != 0) {
@@ -130,6 +185,8 @@ bool SocketManager::Close(InetSocket *inetSocket) {
 	}
 	inetSocket->state = SocketState::Unused;
 	inetSocket->sock = 0;
+	if (pspSocket >= 0 && pspSocket < 256)
+		g_ftb3SocketHistory[pspSocket].clear();
 	return true;
 }
 
@@ -141,9 +198,10 @@ bool SocketManager::GetInetSocket(int sock, InetSocket **inetSocket) {
 	}
 	*inetSocket = inetSockets_ + sock;
 
-	// Diagnostic only. Every raw sceNetInet send/recv/shutdown/close path first
-	// resolves the PSP socket here. If the socket is already connected to FTB3's
-	// TLS companion port, preserve the exact guest PC/thread that touched it.
+	// Record every PSP-side raw socket lookup, even before connect() has assigned
+	// a peer. If this socket later turns out to be FTB3's 10061 connection, the
+	// close/term dump will reveal the exact guest PCs that touched it.
+	RecordFTB3SocketAccess("GET_INET", sock, (*inetSocket)->sock);
 	TraceFTB3RawSocket("ACCESS", sock, (*inetSocket)->sock);
 	return true;
 }
@@ -159,6 +217,7 @@ SOCKET SocketManager::GetHostSocketFromInetSocket(int sock) {
 		// Map 0 to 0, special case.
 		return 0;
 	}
+	RecordFTB3SocketAccess("HOST_LOOKUP", sock, inetSockets_[sock].sock);
 	TraceFTB3RawSocket("HOST_LOOKUP", sock, inetSockets_[sock].sock);
 	return inetSockets_[sock].sock;
 }
@@ -167,11 +226,15 @@ void SocketManager::CloseAll() {
 	for (int i = 0; i < ARRAY_SIZE(inetSockets_); ++i) {
 		auto &sock = inetSockets_[i];
 		if (sock.state != SocketState::Unused) {
+			RecordFTB3SocketAccess("CLOSE_ALL_REQUEST", i, sock.sock);
+			DumpFTB3SocketHistory(i, sock.sock);
 			TraceFTB3RawSocket("CLOSE_ALL", i, sock.sock);
 			closesocket(sock.sock);
 		}
 		sock.state = SocketState::Unused;
 		sock.sock = 0;
+		if (i < 256)
+			g_ftb3SocketHistory[i].clear();
 	}
 }
 
