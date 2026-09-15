@@ -230,7 +230,22 @@ int HTTPRequest::sendRequest(u32 postDataPtr, u32 postDataSize) {
 	if (!fileUrl.Valid()) {
 		return SCE_HTTP_ERROR_INVALID_URL;
 	}
-	if (!client.Resolve(fileUrl.Host().c_str(), fileUrl.Port())) {
+
+	// FTB3 builds the secure SVO endpoint as the plaintext SVO port + 1.
+	// sceHttp in PPSSPP does not implement the PSP's legacy TLS transport, so for
+	// FTB3's XML endpoint keep the game-visible HTTPS URL intact but connect the
+	// underlying plaintext socket to the companion HTTP service on 10060.
+	int targetPort = fileUrl.Port();
+	const bool ftb3HttpsShim = fileUrl.Protocol() == "https" &&
+		startsWithNoCase(fileUrl.Resource(), "/FTB3_XML/") &&
+		(targetPort == 10061 || targetPort == 10060);
+	if (ftb3HttpsShim) {
+		targetPort = 10060;
+		NOTICE_LOG(Log::sceNet, "FTB3 HTTPS SHIM HIT: %s:%d%s -> plaintext port %d",
+			fileUrl.Host().c_str(), fileUrl.Port(), fileUrl.Resource().c_str(), targetPort);
+	}
+
+	if (!client.Resolve(fileUrl.Host().c_str(), targetPort)) {
 		ERROR_LOG(Log::sceNet, "Failed resolving %s", fileUrl.ToString().c_str());
 		return -1;
 	}
