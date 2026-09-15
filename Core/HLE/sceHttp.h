@@ -18,6 +18,7 @@
 #pragma once
 
 #include <map>
+#include "Common/Log.h"
 #include "Common/Net/HTTPClient.h"
 #include "Common/Net/LegacyFTB3HTTPClient.h"
 
@@ -82,12 +83,15 @@ enum SceHttpErrorCode {
 };
 
 enum SceHttpsErrorCode {
+	SCE_SSL_ERROR_NOT_INIT = 0x80435001,
+	SCE_SSL_ERROR_ALREADY_INIT = 0x80435020,
 	SCE_HTTPS_ERROR_OUT_OF_MEMORY = 0x80435022,
 	SCE_HTTPS_ERROR_CERT = 0x80435060,
 	SCE_HTTPS_ERROR_HANDSHAKE = 0x80435061,
 	SCE_HTTPS_ERROR_IO = 0x80435062,
 	SCE_HTTPS_ERROR_INTERNAL = 0x80435063,
-	SCE_HTTPS_ERROR_PROXY = 0x80435064
+	SCE_HTTPS_ERROR_PROXY = 0x80435064,
+	SCE_SSL_ERROR_INVALID_PARAMETER = 0x804351FE
 };
 
 enum PSPHttpMethod {
@@ -299,6 +303,158 @@ public:
 	int readData(u32 destDataPtr, u32 size);
 	int sendRequest(u32 postDataPtr, u32 postDataSize);
 };
+
+// FTB3 HTTPS compatibility state.
+//
+// PPSSPP's sceHttps entry points historically returned success while discarding
+// all PSP-visible state. FTB3 calls these entry points as a real lifecycle, so
+// keep the state the game establishes instead of treating the calls as no-ops.
+// This first pass deliberately does not alter MultiServer or certificate policy;
+// it gives the emulator a coherent HTTPS state that the transport can consume.
+struct FTB3HttpsCompatState {
+	bool initialized = false;
+	bool defaultCertLoaded = false;
+	bool systemCookieLoaded = false;
+	bool systemCookieDirty = false;
+	u32 initArg1 = 0;
+	u32 initArg2 = 0;
+	u32 initArg3 = 0;
+	u32 initArg4 = 0;
+	u32 certArg1 = 0;
+	u32 certArg2 = 0;
+	u32 sslOptions = 0x3F;
+	int sslCallbackId = 0;
+	u32 sslCallbackFunc = 0;
+	u32 sslCallbackArg = 0;
+	int lastSslError = 0;
+	u32 lastSslDetail = 0;
+};
+
+inline FTB3HttpsCompatState g_ftb3HttpsCompatState;
+
+// These are defined in sceHttp.cpp and remain the canonical module flags.
+extern bool httpInited;
+extern bool httpsInited;
+
+// Real compatibility implementations used by FTB3. Function-like macro aliases
+// below rename PPSSPP's old static no-op definitions inside sceHttp.cpp while
+// leaving the HLE registration table bound to these implementations.
+static inline int sceHttpsInit(int arg1, int arg2, int arg3, int arg4) {
+	if (httpsInited)
+		return SCE_SSL_ERROR_ALREADY_INIT;
+
+	g_ftb3HttpsCompatState = {};
+	g_ftb3HttpsCompatState.initialized = true;
+	g_ftb3HttpsCompatState.initArg1 = static_cast<u32>(arg1);
+	g_ftb3HttpsCompatState.initArg2 = static_cast<u32>(arg2);
+	g_ftb3HttpsCompatState.initArg3 = static_cast<u32>(arg3);
+	g_ftb3HttpsCompatState.initArg4 = static_cast<u32>(arg4);
+	g_ftb3HttpsCompatState.sslOptions = 0x3F;
+	httpsInited = true;
+
+	ERROR_LOG(Log::sceNet, "[FTB3 HTTPS] sceHttpsInit state created args=%08x,%08x,%08x,%08x options=%02x",
+		g_ftb3HttpsCompatState.initArg1, g_ftb3HttpsCompatState.initArg2,
+		g_ftb3HttpsCompatState.initArg3, g_ftb3HttpsCompatState.initArg4,
+		g_ftb3HttpsCompatState.sslOptions);
+	return 0;
+}
+
+static inline int sceHttpsInitWithPath(int arg1, int arg2, int arg3) {
+	if (httpsInited)
+		return SCE_SSL_ERROR_ALREADY_INIT;
+
+	g_ftb3HttpsCompatState = {};
+	g_ftb3HttpsCompatState.initialized = true;
+	g_ftb3HttpsCompatState.initArg1 = static_cast<u32>(arg1);
+	g_ftb3HttpsCompatState.initArg2 = static_cast<u32>(arg2);
+	g_ftb3HttpsCompatState.initArg3 = static_cast<u32>(arg3);
+	g_ftb3HttpsCompatState.sslOptions = 0x3F;
+	httpsInited = true;
+
+	ERROR_LOG(Log::sceNet, "[FTB3 HTTPS] sceHttpsInitWithPath state created args=%08x,%08x,%08x options=%02x",
+		g_ftb3HttpsCompatState.initArg1, g_ftb3HttpsCompatState.initArg2,
+		g_ftb3HttpsCompatState.initArg3, g_ftb3HttpsCompatState.sslOptions);
+	return 0;
+}
+
+static inline int sceHttpsEnd() {
+	if (!httpsInited)
+		return SCE_SSL_ERROR_NOT_INIT;
+
+	ERROR_LOG(Log::sceNet,
+		"[FTB3 HTTPS] sceHttpsEnd certLoaded=%d cookieLoaded=%d callback=%08x lastError=%08x detail=%08x",
+		g_ftb3HttpsCompatState.defaultCertLoaded ? 1 : 0,
+		g_ftb3HttpsCompatState.systemCookieLoaded ? 1 : 0,
+		g_ftb3HttpsCompatState.sslCallbackFunc,
+		static_cast<u32>(g_ftb3HttpsCompatState.lastSslError),
+		g_ftb3HttpsCompatState.lastSslDetail);
+
+	g_ftb3HttpsCompatState = {};
+	httpsInited = false;
+	return 0;
+}
+
+static inline int sceHttpsLoadDefaultCert(int arg1, int arg2) {
+	if (!httpsInited)
+		return SCE_SSL_ERROR_NOT_INIT;
+
+	g_ftb3HttpsCompatState.defaultCertLoaded = true;
+	g_ftb3HttpsCompatState.certArg1 = static_cast<u32>(arg1);
+	g_ftb3HttpsCompatState.certArg2 = static_cast<u32>(arg2);
+	ERROR_LOG(Log::sceNet, "[FTB3 HTTPS] default certificate set loaded args=%08x,%08x",
+		g_ftb3HttpsCompatState.certArg1, g_ftb3HttpsCompatState.certArg2);
+	return 0;
+}
+
+static inline int sceHttpsSetSslCallback(int id, u32 callbackFuncPtr, u32 userArgPtr) {
+	if (!httpsInited)
+		return SCE_SSL_ERROR_NOT_INIT;
+
+	g_ftb3HttpsCompatState.sslCallbackId = id;
+	g_ftb3HttpsCompatState.sslCallbackFunc = callbackFuncPtr;
+	g_ftb3HttpsCompatState.sslCallbackArg = userArgPtr;
+	ERROR_LOG(Log::sceNet, "[FTB3 HTTPS] SSL callback %s id=%d func=%08x arg=%08x",
+		callbackFuncPtr ? "registered" : "cleared", id, callbackFuncPtr, userArgPtr);
+	return 0;
+}
+
+static inline int sceHttpsDisableOption(int flags) {
+	if (!httpsInited)
+		return SCE_SSL_ERROR_NOT_INIT;
+
+	g_ftb3HttpsCompatState.sslOptions &= ~static_cast<u32>(flags);
+	ERROR_LOG(Log::sceNet, "[FTB3 HTTPS] disabled SSL option flags=%08x -> active=%08x",
+		static_cast<u32>(flags), g_ftb3HttpsCompatState.sslOptions);
+	return 0;
+}
+
+static inline int sceHttpLoadSystemCookie() {
+	g_ftb3HttpsCompatState.systemCookieLoaded = true;
+	g_ftb3HttpsCompatState.systemCookieDirty = false;
+	ERROR_LOG(Log::sceNet, "[FTB3 HTTPS] system cookie store loaded (in-memory compatibility state)");
+	return 0;
+}
+
+static inline int sceHttpSaveSystemCookie() {
+	if (!g_ftb3HttpsCompatState.systemCookieLoaded)
+		return SCE_HTTP_ERROR_BEFORE_COOKIE_LOAD;
+
+	g_ftb3HttpsCompatState.systemCookieDirty = false;
+	ERROR_LOG(Log::sceNet, "[FTB3 HTTPS] system cookie store saved (in-memory compatibility state)");
+	return 0;
+}
+
+// sceHttp.cpp still contains the original placeholder implementations. Rename
+// only function definitions/calls that use parentheses; registration entries use
+// bare function identifiers and therefore continue to bind to the functions above.
+#define sceHttpsInit(...) sceHttpsInit_PPSSPP_placeholder(__VA_ARGS__)
+#define sceHttpsInitWithPath(...) sceHttpsInitWithPath_PPSSPP_placeholder(__VA_ARGS__)
+#define sceHttpsEnd(...) sceHttpsEnd_PPSSPP_placeholder(__VA_ARGS__)
+#define sceHttpsLoadDefaultCert(...) sceHttpsLoadDefaultCert_PPSSPP_placeholder(__VA_ARGS__)
+#define sceHttpsSetSslCallback(...) sceHttpsSetSslCallback_PPSSPP_placeholder(__VA_ARGS__)
+#define sceHttpsDisableOption(...) sceHttpsDisableOption_PPSSPP_placeholder(__VA_ARGS__)
+#define sceHttpLoadSystemCookie(...) sceHttpLoadSystemCookie_PPSSPP_placeholder(__VA_ARGS__)
+#define sceHttpSaveSystemCookie(...) sceHttpSaveSystemCookie_PPSSPP_placeholder(__VA_ARGS__)
 
 void __HttpInit();
 void __HttpShutdown();
