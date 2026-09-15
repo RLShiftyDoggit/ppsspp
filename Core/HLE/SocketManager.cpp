@@ -1,6 +1,8 @@
 #include "Common/Net/SocketCompat.h"
 #include "Core/HLE/NetInetConstants.h"
 #include "Core/HLE/SocketManager.h"
+#include "Core/HLE/sceKernelThread.h"
+#include "Core/MIPS/MIPS.h"
 #include "Common/Log.h"
 
 #include <mutex>
@@ -30,6 +32,23 @@ static bool IsFTB3LegacyTLSPeer(SOCKET sock, int *peerPort) {
 	if (peerPort)
 		*peerPort = port;
 	return port == 10061;
+}
+
+static void TraceFTB3RawSocket(const char *event, int pspSocket, SOCKET hostSocket) {
+	int peerPort = 0;
+	if (!IsFTB3LegacyTLSPeer(hostSocket, &peerPort))
+		return;
+
+	const u32 pc = currentMIPS ? currentMIPS->pc : 0;
+	const int threadId = sceKernelGetThreadId();
+	ERROR_LOG(Log::sceNet,
+		"[FTB3 WIRE] %s pspSocket=%d hostSocket=%llu pc=%08x thread=%d peerPort=%d",
+		event,
+		pspSocket,
+		static_cast<unsigned long long>(hostSocket),
+		pc,
+		threadId,
+		peerPort);
 }
 
 InetSocket *SocketManager::CreateSocket(int *index, int *returned_errno, SocketState state, int domain, int type, int protocol) {
@@ -95,6 +114,16 @@ InetSocket *SocketManager::AdoptSocket(int *index, SOCKET hostSocket, const Inet
 
 bool SocketManager::Close(InetSocket *inetSocket) {
 	_dbg_assert_(inetSocket->state != SocketState::Unused);
+
+	int pspSocket = -1;
+	for (int i = MIN_VALID_INET_SOCKET; i < ARRAY_SIZE(inetSockets_); ++i) {
+		if (&inetSockets_[i] == inetSocket) {
+			pspSocket = i;
+			break;
+		}
+	}
+	TraceFTB3RawSocket("CLOSE", pspSocket, inetSocket->sock);
+
 	if (closesocket(inetSocket->sock) != 0) {
 		ERROR_LOG(Log::sceNet, "closesocket(%d) failed", inetSocket->sock);
 		return false;
@@ -112,16 +141,10 @@ bool SocketManager::GetInetSocket(int sock, InetSocket **inetSocket) {
 	}
 	*inetSocket = inetSockets_ + sock;
 
-	// Diagnostic only: if FTB3 is bypassing sceHttp/LegacyFTB3Client and driving
-	// its TLS session through the PSP's raw sceNetInet socket API, every send/recv
-	// first passes through GetInetSocket(). Detect the already-connected 10061
-	// peer here at ERROR level so it remains visible with the user's current log
-	// filtering. No traffic is modified.
-	int peerPort = 0;
-	if (IsFTB3LegacyTLSPeer((*inetSocket)->sock, &peerPort)) {
-		ERROR_LOG(Log::sceNet, "[FTB3 RAW TRACE] PSP inet socket %d (host socket %llu) is connected to legacy TLS port %d",
-			sock, static_cast<unsigned long long>((*inetSocket)->sock), peerPort);
-	}
+	// Diagnostic only. Every raw sceNetInet send/recv/shutdown/close path first
+	// resolves the PSP socket here. If the socket is already connected to FTB3's
+	// TLS companion port, preserve the exact guest PC/thread that touched it.
+	TraceFTB3RawSocket("ACCESS", sock, (*inetSocket)->sock);
 	return true;
 }
 
@@ -136,12 +159,15 @@ SOCKET SocketManager::GetHostSocketFromInetSocket(int sock) {
 		// Map 0 to 0, special case.
 		return 0;
 	}
+	TraceFTB3RawSocket("HOST_LOOKUP", sock, inetSockets_[sock].sock);
 	return inetSockets_[sock].sock;
 }
 
 void SocketManager::CloseAll() {
-	for (auto &sock : inetSockets_) {
+	for (int i = 0; i < ARRAY_SIZE(inetSockets_); ++i) {
+		auto &sock = inetSockets_[i];
 		if (sock.state != SocketState::Unused) {
+			TraceFTB3RawSocket("CLOSE_ALL", i, sock.sock);
 			closesocket(sock.sock);
 		}
 		sock.state = SocketState::Unused;
