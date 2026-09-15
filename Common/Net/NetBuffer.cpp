@@ -15,6 +15,26 @@
 
 namespace net {
 
+static int GetPeerPort(uintptr_t sock) {
+	sockaddr_storage peer{};
+#if PPSSPP_PLATFORM(WINDOWS)
+	int peerLen = static_cast<int>(sizeof(peer));
+	if (getpeername(static_cast<SOCKET>(sock), reinterpret_cast<sockaddr *>(&peer), &peerLen) != 0)
+		return 0;
+#else
+	socklen_t peerLen = static_cast<socklen_t>(sizeof(peer));
+	if (getpeername(static_cast<int>(sock), reinterpret_cast<sockaddr *>(&peer), &peerLen) != 0)
+		return 0;
+#endif
+	if (peer.ss_family == AF_INET)
+		return ntohs(reinterpret_cast<const sockaddr_in *>(&peer)->sin_port);
+#if defined(AF_INET6)
+	if (peer.ss_family == AF_INET6)
+		return ntohs(reinterpret_cast<const sockaddr_in6 *>(&peer)->sin6_port);
+#endif
+	return 0;
+}
+
 void RequestProgress::Update(int64_t downloaded, int64_t totalBytes, bool done) {
 	if (totalBytes) {
 		progress = (double)downloaded / (double)totalBytes;
@@ -29,6 +49,10 @@ void RequestProgress::Update(int64_t downloaded, int64_t totalBytes, bool done) 
 
 bool Buffer::FlushSocket(uintptr_t sock, double timeout, bool *cancelled) {
 	static constexpr float CANCEL_INTERVAL = 0.25f;
+
+	if (GetPeerPort(sock) == 10061) {
+		ERROR_LOG(Log::sceNet, "[FTB3 HOST TRACE] NetBuffer::FlushSocket is using a connection to port 10061");
+	}
 
 	data_.iterate_blocks([&](const char *data, size_t size) {
 		for (size_t pos = 0, end = size; pos < end; ) {
