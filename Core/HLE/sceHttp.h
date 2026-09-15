@@ -19,6 +19,7 @@
 
 #include <map>
 #include "Common/Net/HTTPClient.h"
+#include "Common/Net/LegacyFTB3HTTPClient.h"
 
 // Based on https://docs.vitasdk.org/group__SceHttpUser.html
 #define 	SCE_HTTP_DEFAULT_RESOLVER_TIMEOUT   (1 * 1000 * 1000U)
@@ -239,10 +240,12 @@ public:
 	HTTPConnection(int templateID, const char* hostString, const char* scheme, u32 port, int enableKeepalive);
 	virtual ~HTTPConnection() = default;
 
-	// FTB3 (UCUS-98716) builds its SVO HTTPS endpoint as HTTP port + 1.
-	// PPSSPP's sceHttp transport is plaintext, so preserve the HTTPS scheme visible
-	// to the game while routing the canonical FTB3 SVO host's 10061 transport to
-	// the existing plaintext companion service on 10060.
+	// The current sceHttp.cpp still contains the first-generation FTB3 plaintext
+	// 10061 -> 10060 rewrite. Preserve the game-visible HTTPS connection while
+	// using an internal sentinel port so that rewrite is bypassed. The specialized
+	// LegacyFTB3Client converts this sentinel back to the real network port 10061
+	// and performs an SSLv3/RSA/RC4-MD5 handshake there. Port 10063 is never used
+	// on the wire.
 	HTTPConnection& operator=(const HTTPConnection& other) {
 		if (this == &other)
 			return *this;
@@ -254,8 +257,8 @@ public:
 		port = other.port;
 		enableKeepalive = other.enableKeepalive;
 
-		if (scheme == "https" && port == 10061 && hostString == "ftb3.psp.online.scea.com")
-			port = 10060;
+		if (scheme == "https" && port == 10061)
+			port = http::LegacyFTB3Client::kFTB3LegacySentinelPort;
 
 		return *this;
 	}
@@ -282,7 +285,7 @@ private:
 	int responseCode_ = -1;
 	int entityLength_ = -1;
 
-	http::Client client;
+	http::LegacyFTB3Client client;
 	//net::RequestProgress progress_(&cancelled_);
 	std::vector<std::string> responseHeaders_;
 	std::string httpLine_;
