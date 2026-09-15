@@ -21,6 +21,8 @@
 #include <deque>
 #include <map>
 #include "Common/Log.h"
+#include "Common/StringUtils.h"
+#include "Core/Config.h"
 #include "Core/HLE/sceRtc.h"
 #include "Common/Net/HTTPClient.h"
 #include "Common/Net/Resolve.h"
@@ -120,7 +122,7 @@
 #define SCE_NP_COMMUNITY_SERVER_ERROR_RANKING_RECORD_FORBIDDEN 				0x8055080c 	
 #define SCE_NP_COMMUNITY_SERVER_ERROR_USER_PROFILE_NOT_FOUND 				0x8055080d 	
 #define SCE_NP_COMMUNITY_SERVER_ERROR_UPLOADER_DATA_NOT_FOUND 				0x8055080e 	
-#define SCE_NP_COMMUNITY_SERVER_ERROR_QUOTA_MASTER_NOT_FOUND 				0x8055080f 	
+#define SCE_NP_COMMUNITY_SERVER_ERROR_QUOTA_MASTER_NOT_FOUND 					0x8055080f 	
 #define SCE_NP_COMMUNITY_SERVER_ERROR_RANKING_TITLE_NOT_FOUND 				0x80550810 	
 #define SCE_NP_COMMUNITY_SERVER_ERROR_BLACKLISTED_USER_ID 					0x80550811 	
 #define SCE_NP_COMMUNITY_SERVER_ERROR_GAME_RANKING_NOT_FOUND 				0x80550812 	
@@ -397,6 +399,12 @@ struct SceNpTicketSection
 
 struct SceNpTicket
 {
+	u32_be version; // Version contents byte are: V1 0M 00 00, where V = major version, M = minor version according to https://www.psdevwiki.com/ps3/X-I-5-Ticket
+	s32_be size; // total ticket size (excluding this 8-bytes header struct)
+};
+
+struct SceNpTicket
+{
 	SceNpTicketHeader header;
 	SceNpTicketSection section; // Body or Parameter sections?
 	//SceNpTicketParamData parameters[]; // a list of TicketParamData following the section
@@ -427,6 +435,7 @@ struct SceNpAuthMemoryStat {
 // Used by PSPNpSigninDialog.cpp
 extern int npSigninState;
 extern PSPTimeval npSigninTimestamp;
+extern std::string npOnlineId;
 
 // Used by sceNet.cpp since we're borrowing Apctl's PSPThread to process NP events & callbacks.
 // TODO: NP events should be processed on it's own PSPThread
@@ -434,6 +443,63 @@ extern std::recursive_mutex npAuthEvtMtx;
 
 // Used by sceNp2.cpp
 extern SceNpCommunicationId npTitleId;
+
+// FTB3 NP-core compatibility state. PPSSPP already populated npOnlineId from
+// the infrastructure username, but sceNpInit/sceNpTerm still advertised
+// themselves as UNIMPL and did not retain a coherent module lifecycle.
+struct FTB3NpCoreCompatState {
+	bool initialized = false;
+	bool onlineIdValid = false;
+	u32 generation = 0;
+};
+
+inline FTB3NpCoreCompatState g_ftb3NpCoreCompatState;
+
+static inline int sceNpInit() {
+	const u32 nextGeneration = g_ftb3NpCoreCompatState.generation + 1;
+
+	// Preserve PPSSPP's existing behavior: use the configured infrastructure
+	// username only when it survives the same PSP-friendly sanitization rules.
+	const std::string sanitized = SanitizeString(g_Config.sInfrastructureUsername,
+		StringRestriction::AlphaNumDashUnderscore, 3, 16);
+	if (g_Config.sInfrastructureUsername == sanitized)
+		npOnlineId = g_Config.sInfrastructureUsername;
+	else
+		npOnlineId.clear();
+
+	g_ftb3NpCoreCompatState.initialized = true;
+	g_ftb3NpCoreCompatState.onlineIdValid = !npOnlineId.empty();
+	g_ftb3NpCoreCompatState.generation = nextGeneration;
+
+	ERROR_LOG(Log::sceNet,
+		"[FTB3 NP] sceNpInit lifecycle created generation=%u onlineIdValid=%d onlineId=%s signInState=%d",
+		nextGeneration,
+		g_ftb3NpCoreCompatState.onlineIdValid ? 1 : 0,
+		npOnlineId.empty() ? "<empty>" : npOnlineId.c_str(),
+		npSigninState);
+	return 0;
+}
+
+static inline int sceNpTerm() {
+	ERROR_LOG(Log::sceNet,
+		"[FTB3 NP] sceNpTerm lifecycle ending initialized=%d generation=%u onlineIdValid=%d signInState=%d",
+		g_ftb3NpCoreCompatState.initialized ? 1 : 0,
+		g_ftb3NpCoreCompatState.generation,
+		g_ftb3NpCoreCompatState.onlineIdValid ? 1 : 0,
+		npSigninState);
+
+	// Preserve PPSSPP's existing termination behavior.
+	npSigninState = NP_SIGNIN_STATUS_NONE;
+	g_ftb3NpCoreCompatState.initialized = false;
+	g_ftb3NpCoreCompatState.onlineIdValid = !npOnlineId.empty();
+	return 0;
+}
+
+// Rename PPSSPP's old sceNp core placeholders in sceNp.cpp. The HLE function
+// table uses bare identifiers, so it continues to bind to the implementations
+// above rather than the renamed placeholder definitions.
+#define sceNpInit(...) sceNpInit_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNpTerm(...) sceNpTerm_PPSSPP_placeholder(__VA_ARGS__)
 
 // FTB3 NP-service compatibility state.  The original PPSSPP functions returned
 // success while discarding all three initialization parameters.  FTB3 supplies
