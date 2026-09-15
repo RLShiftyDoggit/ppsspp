@@ -8,11 +8,9 @@
 #include <utility>
 
 #include "Common/File/Path.h"
-#include "Common/Log.h"
 #include "Common/Net/NetBuffer.h"
 #include "Common/Net/Resolve.h"
 #include "Common/Net/HTTPRequest.h"
-#include "Common/Net/SocketCompat.h"
 
 namespace net {
 
@@ -31,31 +29,7 @@ public:
 	void Disconnect();
 
 	// TODO: Try to expose this less.
-	uintptr_t sock() const {
-#if PPSSPP_PLATFORM(WINDOWS)
-		// FTB3 diagnostic pass: this catches PPSSPP's host-side net::Connection
-		// path, which is separate from the emulated PSP sceNetInet sockets. The
-		// previous raw-socket trace showed no hit even though the server accepted a
-		// 10061 connection, so identify whether Common/Net owns that connection.
-		// Diagnostic only; no socket behavior or traffic is changed.
-		if ((intptr_t)sock_ != -1) {
-			sockaddr_storage peer{};
-			int peerLen = static_cast<int>(sizeof(peer));
-			if (::getpeername(static_cast<SOCKET>(sock_), reinterpret_cast<sockaddr *>(&peer), &peerLen) == 0) {
-				int peerPort = 0;
-				if (peer.ss_family == AF_INET)
-					peerPort = ntohs(reinterpret_cast<const sockaddr_in *>(&peer)->sin_port);
-				else if (peer.ss_family == AF_INET6)
-					peerPort = ntohs(reinterpret_cast<const sockaddr_in6 *>(&peer)->sin6_port);
-				if (peerPort == 10061) {
-					ERROR_LOG(Log::sceNet, "[FTB3 HOST TRACE] net::Connection host socket %llu is connected to legacy TLS port %d (host=%s storedPort=%d)",
-						static_cast<unsigned long long>(sock_), peerPort, host_.c_str(), port_);
-				}
-			}
-		}
-#endif
-		return sock_;
-	}
+	uintptr_t sock() const { return sock_; }
 
 	std::string GetLocalIpAsString() const;
 
