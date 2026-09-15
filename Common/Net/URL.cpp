@@ -59,6 +59,16 @@ void Url::Split() {
 		port_ = protocol_ == "https" ? 443 : 80;
 	}
 
+	// FTB3 compatibility branch: preserve the game-visible HTTPS URL while
+	// marking its legacy SVO request for the dedicated SSLv3 transport. 10063 is
+	// an internal sentinel only; LegacyFTB3Client converts it back to the actual
+	// network endpoint 10061 before connect(). This also catches absolute request
+	// URLs, which bypass the connection object's inherited sentinel port.
+	if (protocol_ == "https" && port_ == 10061 && startsWithNoCase(resource_, "/FTB3_XML/")) {
+		NOTICE_LOG(Log::Net, "FTB3 legacy SSLv3 URL selected: %s:10061%s", host_.c_str(), resource_.c_str());
+		port_ = 10063;
+	}
+
 	valid_ = protocol_.size() > 1 && host_.size() > 1;
 }
 
@@ -146,7 +156,6 @@ std::string UriDecode(std::string_view sSrc)
 	// Note from RFC1630:  "Sequences which start with a percent sign
 	// but are not followed by two hexadecimal characters (0-9, A-F) are reserved
 	// for future extension"
-
 	const unsigned char * pSrc = (const unsigned char *)sSrc.data();
 	const size_t SRC_LEN = sSrc.length();
 	const unsigned char * const SRC_END = pSrc + SRC_LEN;
