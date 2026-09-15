@@ -24,26 +24,36 @@ public:
 		legacyFTB3_ = port == kFTB3LegacySentinelPort;
 		const int networkPort = legacyFTB3_ ? kFTB3SSLPort : port;
 		if (legacyFTB3_) {
-			NOTICE_LOG(Log::HTTP, "FTB3 SSLv3 transport selected: %s:%d -> network port %d", host ? host : "", port, networkPort);
+			// Deliberately ERROR level for the current FTB3 diagnostic pass so this
+			// cannot disappear behind normal HTTP/Net log filtering.
+			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client::Resolve selected host=%s requestedPort=%d networkPort=%d",
+				host ? host : "", port, networkPort);
 		}
 		return Client::Resolve(host, networkPort, type);
 	}
 
 	bool Connect(int maxTries = 2, double timeout = 20.0f, bool *cancelConnect = nullptr) {
-		if (!Client::Connect(maxTries, timeout, cancelConnect))
+		if (legacyFTB3_) {
+			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client::Connect entering, target network port=%d", kFTB3SSLPort);
+		}
+		if (!Client::Connect(maxTries, timeout, cancelConnect)) {
+			if (legacyFTB3_) {
+				ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client::Connect TCP connect failed before SSLv3 handshake");
+			}
 			return false;
+		}
 		if (!legacyFTB3_)
 			return true;
 
+		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client TCP connected to port %d; starting SSLv3 handshake", kFTB3SSLPort);
 		legacySSL_ = std::make_unique<net::LegacySSL3Client>(sock());
 		std::string error;
-		NOTICE_LOG(Log::HTTP, "FTB3 SSLv3 handshake starting on network port %d", kFTB3SSLPort);
 		if (!legacySSL_->Handshake(&error)) {
-			ERROR_LOG(Log::HTTP, "FTB3 SSLv3 handshake failed: %s", error.c_str());
+			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 handshake FAILED: %s", error.c_str());
 			legacySSL_.reset();
 			return false;
 		}
-		NOTICE_LOG(Log::HTTP, "FTB3 SSLv3 handshake completed");
+		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 handshake COMPLETED");
 		return true;
 	}
 
@@ -63,6 +73,9 @@ public:
 
 		if (progress)
 			progress->Update(0, 0, false);
+
+		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client HTTP request method=%s resource=%s bodyBytes=%zu",
+			method ? method : "", req.resource.c_str(), data.size());
 
 		std::string request;
 		request.reserve(512 + data.size());
@@ -85,9 +98,10 @@ public:
 
 		std::string error;
 		if (!legacySSL_->WriteApplicationData(request, &error)) {
-			ERROR_LOG(Log::HTTP, "FTB3 SSLv3 HTTP write failed: %s", error.c_str());
+			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 HTTP write FAILED: %s", error.c_str());
 			return -1;
 		}
+		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 HTTP write completed");
 
 		responseReady_ = false;
 		responseBody_.clear();
@@ -103,13 +117,14 @@ public:
 		std::string plaintext;
 		std::string error;
 		if (!legacySSL_->ReadApplicationData(&plaintext, &error)) {
-			ERROR_LOG(Log::HTTP, "FTB3 SSLv3 HTTP read failed: %s", error.c_str());
+			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 HTTP read FAILED: %s", error.c_str());
 			return -1;
 		}
+		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client received %zu decrypted HTTP byte(s)", plaintext.size());
 
 		const size_t headerEnd = plaintext.find("\r\n\r\n");
 		if (headerEnd == std::string::npos) {
-			ERROR_LOG(Log::HTTP, "FTB3 SSLv3 response did not contain a complete HTTP header block");
+			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client response did not contain a complete HTTP header block");
 			return -1;
 		}
 
@@ -123,14 +138,16 @@ public:
 		if (statusLine)
 			*statusLine = firstLine;
 
+		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client HTTP status line: %s", firstLine.c_str());
+
 		const size_t firstSpace = firstLine.find(' ');
 		if (firstSpace == std::string::npos) {
-			ERROR_LOG(Log::HTTP, "FTB3 SSLv3 response had invalid HTTP status line: %s", firstLine.c_str());
+			ERROR_LOG(Log::sceNet, "FTB3 SSLv3 response had invalid HTTP status line: %s", firstLine.c_str());
 			return -1;
 		}
 		const int code = std::atoi(firstLine.c_str() + firstSpace + 1);
 		if (code <= 0) {
-			ERROR_LOG(Log::HTTP, "FTB3 SSLv3 response had invalid HTTP status code: %s", firstLine.c_str());
+			ERROR_LOG(Log::sceNet, "FTB3 SSLv3 response had invalid HTTP status code: %s", firstLine.c_str());
 			return -1;
 		}
 
@@ -145,7 +162,7 @@ public:
 		}
 
 		if (responseHeaders.empty()) {
-			ERROR_LOG(Log::HTTP, "FTB3 SSLv3 response contained no HTTP headers");
+			ERROR_LOG(Log::sceNet, "FTB3 SSLv3 response contained no HTTP headers");
 			return -1;
 		}
 		return code;
