@@ -3,10 +3,18 @@
 #include "ppsspp_config.h"
 
 #include "Core/HLE/HLE.h"
+#include "Core/HLE/sceKernelThread.h"
+#include "Core/MIPS/MIPS.h"
+#include "Core/MemMapHelpers.h"
 
+#include "Common/Log.h"
 #include "Common/Net/SocketCompat.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <memory>
+#include <set>
+#include <string>
 
 // Using constants instead of numbers for readability reason, since PSP_THREAD_ATTR_KERNEL/USER is located in sceKernelThread.cpp instead of sceKernelThread.h
 #ifndef PSP_THREAD_ATTR_KERNEL
@@ -122,6 +130,195 @@ extern u32 netApctlState;
 extern SceNetApctlInfoInternal netApctlInfo;
 extern const char *const defaultNetConfigName;
 extern const char *const defaultNetSSID;
+
+// ---------------------------------------------------------------------------
+// FTB3 raw 10061 wire trace
+// ---------------------------------------------------------------------------
+// Wireshark proved that a TCP connection to 10061 is opened and then closed
+// without any application payload.  Trace the PSP raw socket HLE directly so
+// we can distinguish a guest sceNetInet connection from host-side PPSSPP HTTP
+// traffic and capture the guest PC that connects, attempts I/O, and closes.
+// No socket behavior is changed here.
+inline std::set<int> g_ftb3RawTlsSockets;
+
+static inline u32 FTB3TracePC() {
+	return currentMIPS ? currentMIPS->pc : 0;
+}
+
+static inline int FTB3TraceThread() {
+	return sceKernelGetThreadId();
+}
+
+static inline bool FTB3TraceSockaddr10061(u32 sockAddrPtr, std::string *address) {
+	if (!sockAddrPtr)
+		return false;
+	const u8 *raw = Memory::GetPointerOrException(sockAddrPtr);
+	const int port = (static_cast<int>(raw[2]) << 8) | raw[3];
+	if (address) {
+		char temp[64];
+		snprintf(temp, sizeof(temp), "%u.%u.%u.%u:%d", raw[4], raw[5], raw[6], raw[7], port);
+		*address = temp;
+	}
+	return port == 10061;
+}
+
+static inline std::string FTB3TraceHexPrefix(u32 bufPtr, u32 bufLen) {
+	if (!bufPtr || !bufLen)
+		return "<empty>";
+	const u8 *data = Memory::GetPointerOrException(bufPtr);
+	const u32 count = std::min<u32>(bufLen, 32);
+	char temp[4];
+	std::string out;
+	out.reserve(count * 3);
+	for (u32 i = 0; i < count; ++i) {
+		snprintf(temp, sizeof(temp), "%02X", data[i]);
+		if (!out.empty())
+			out.push_back(' ');
+		out += temp;
+	}
+	if (count < bufLen)
+		out += " ...";
+	return out;
+}
+
+// Forward declarations for PPSSPP's original static implementations.  The
+// function-like macros below rename their definitions inside sceNetInet.cpp;
+// HLE registration uses bare identifiers and therefore binds to these wrappers.
+static int sceNetInetConnect_PPSSPP_placeholder(int socket, u32 sockAddrPtr, int sockAddrLen);
+static int sceNetInetSend_PPSSPP_placeholder(int socket, u32 bufPtr, u32 bufLen, u32 flags);
+static int sceNetInetRecv_PPSSPP_placeholder(int socket, u32 bufPtr, u32 bufLen, u32 flags);
+static int sceNetInetSendmsg_PPSSPP_placeholder(int socket, u32 msghdrPtr, int flags);
+static int sceNetInetRecvmsg_PPSSPP_placeholder(int socket, u32 msghdrPtr, int flags);
+static int sceNetInetShutdown_PPSSPP_placeholder(int socket, int how);
+static int sceNetInetSocketAbort_PPSSPP_placeholder(int socket);
+static int sceNetInetClose_PPSSPP_placeholder(int socket);
+static int sceNetInetCloseWithRST_PPSSPP_placeholder(int socket);
+static int sceNetInetTerm_PPSSPP_placeholder();
+
+static inline int sceNetInetConnect(int socket, u32 sockAddrPtr, int sockAddrLen) {
+	std::string destination;
+	const bool ftb3 = FTB3TraceSockaddr10061(sockAddrPtr, &destination);
+	if (ftb3) {
+		g_ftb3RawTlsSockets.insert(socket);
+		ERROR_LOG(Log::sceNet,
+			"[FTB3 WIRE] CONNECT enter socket=%d pc=%08x thread=%d dst=%s sockaddr=%08x len=%d",
+			socket, FTB3TracePC(), FTB3TraceThread(), destination.c_str(), sockAddrPtr, sockAddrLen);
+	}
+	const int result = sceNetInetConnect_PPSSPP_placeholder(socket, sockAddrPtr, sockAddrLen);
+	if (ftb3) {
+		ERROR_LOG(Log::sceNet,
+			"[FTB3 WIRE] CONNECT return socket=%d pc=%08x thread=%d result=%d",
+			socket, FTB3TracePC(), FTB3TraceThread(), result);
+	}
+	return result;
+}
+
+static inline int sceNetInetSend(int socket, u32 bufPtr, u32 bufLen, u32 flags) {
+	const bool ftb3 = g_ftb3RawTlsSockets.count(socket) != 0;
+	if (ftb3) {
+		const std::string prefix = FTB3TraceHexPrefix(bufPtr, bufLen);
+		ERROR_LOG(Log::sceNet,
+			"[FTB3 WIRE] SEND enter socket=%d pc=%08x thread=%d len=%u flags=%08x data=%s",
+			socket, FTB3TracePC(), FTB3TraceThread(), bufLen, flags, prefix.c_str());
+	}
+	const int result = sceNetInetSend_PPSSPP_placeholder(socket, bufPtr, bufLen, flags);
+	if (ftb3) {
+		ERROR_LOG(Log::sceNet,
+			"[FTB3 WIRE] SEND return socket=%d pc=%08x thread=%d result=%d",
+			socket, FTB3TracePC(), FTB3TraceThread(), result);
+	}
+	return result;
+}
+
+static inline int sceNetInetRecv(int socket, u32 bufPtr, u32 bufLen, u32 flags) {
+	const bool ftb3 = g_ftb3RawTlsSockets.count(socket) != 0;
+	if (ftb3) {
+		ERROR_LOG(Log::sceNet,
+			"[FTB3 WIRE] RECV enter socket=%d pc=%08x thread=%d want=%u flags=%08x",
+			socket, FTB3TracePC(), FTB3TraceThread(), bufLen, flags);
+	}
+	const int result = sceNetInetRecv_PPSSPP_placeholder(socket, bufPtr, bufLen, flags);
+	if (ftb3) {
+		std::string prefix = result > 0 ? FTB3TraceHexPrefix(bufPtr, static_cast<u32>(result)) : "<none>";
+		ERROR_LOG(Log::sceNet,
+			"[FTB3 WIRE] RECV return socket=%d pc=%08x thread=%d result=%d data=%s",
+			socket, FTB3TracePC(), FTB3TraceThread(), result, prefix.c_str());
+	}
+	return result;
+}
+
+static inline int sceNetInetSendmsg(int socket, u32 msghdrPtr, int flags) {
+	const bool ftb3 = g_ftb3RawTlsSockets.count(socket) != 0;
+	if (ftb3)
+		ERROR_LOG(Log::sceNet, "[FTB3 WIRE] SENDMSG enter socket=%d pc=%08x thread=%d msghdr=%08x flags=%08x", socket, FTB3TracePC(), FTB3TraceThread(), msghdrPtr, flags);
+	const int result = sceNetInetSendmsg_PPSSPP_placeholder(socket, msghdrPtr, flags);
+	if (ftb3)
+		ERROR_LOG(Log::sceNet, "[FTB3 WIRE] SENDMSG return socket=%d pc=%08x thread=%d result=%d", socket, FTB3TracePC(), FTB3TraceThread(), result);
+	return result;
+}
+
+static inline int sceNetInetRecvmsg(int socket, u32 msghdrPtr, int flags) {
+	const bool ftb3 = g_ftb3RawTlsSockets.count(socket) != 0;
+	if (ftb3)
+		ERROR_LOG(Log::sceNet, "[FTB3 WIRE] RECVMSG enter socket=%d pc=%08x thread=%d msghdr=%08x flags=%08x", socket, FTB3TracePC(), FTB3TraceThread(), msghdrPtr, flags);
+	const int result = sceNetInetRecvmsg_PPSSPP_placeholder(socket, msghdrPtr, flags);
+	if (ftb3)
+		ERROR_LOG(Log::sceNet, "[FTB3 WIRE] RECVMSG return socket=%d pc=%08x thread=%d result=%d", socket, FTB3TracePC(), FTB3TraceThread(), result);
+	return result;
+}
+
+static inline int sceNetInetShutdown(int socket, int how) {
+	const bool ftb3 = g_ftb3RawTlsSockets.count(socket) != 0;
+	if (ftb3)
+		ERROR_LOG(Log::sceNet, "[FTB3 WIRE] SHUTDOWN socket=%d pc=%08x thread=%d how=%d", socket, FTB3TracePC(), FTB3TraceThread(), how);
+	return sceNetInetShutdown_PPSSPP_placeholder(socket, how);
+}
+
+static inline int sceNetInetSocketAbort(int socket) {
+	const bool ftb3 = g_ftb3RawTlsSockets.count(socket) != 0;
+	if (ftb3)
+		ERROR_LOG(Log::sceNet, "[FTB3 WIRE] ABORT socket=%d pc=%08x thread=%d", socket, FTB3TracePC(), FTB3TraceThread());
+	const int result = sceNetInetSocketAbort_PPSSPP_placeholder(socket);
+	g_ftb3RawTlsSockets.erase(socket);
+	return result;
+}
+
+static inline int sceNetInetClose(int socket) {
+	const bool ftb3 = g_ftb3RawTlsSockets.count(socket) != 0;
+	if (ftb3)
+		ERROR_LOG(Log::sceNet, "[FTB3 WIRE] CLOSE socket=%d pc=%08x thread=%d", socket, FTB3TracePC(), FTB3TraceThread());
+	const int result = sceNetInetClose_PPSSPP_placeholder(socket);
+	g_ftb3RawTlsSockets.erase(socket);
+	return result;
+}
+
+static inline int sceNetInetCloseWithRST(int socket) {
+	const bool ftb3 = g_ftb3RawTlsSockets.count(socket) != 0;
+	if (ftb3)
+		ERROR_LOG(Log::sceNet, "[FTB3 WIRE] CLOSE_RST socket=%d pc=%08x thread=%d", socket, FTB3TracePC(), FTB3TraceThread());
+	const int result = sceNetInetCloseWithRST_PPSSPP_placeholder(socket);
+	g_ftb3RawTlsSockets.erase(socket);
+	return result;
+}
+
+static inline int sceNetInetTerm() {
+	if (!g_ftb3RawTlsSockets.empty())
+		ERROR_LOG(Log::sceNet, "[FTB3 WIRE] INET_TERM pc=%08x thread=%d trackedSockets=%zu", FTB3TracePC(), FTB3TraceThread(), g_ftb3RawTlsSockets.size());
+	const int result = sceNetInetTerm_PPSSPP_placeholder();
+	g_ftb3RawTlsSockets.clear();
+	return result;
+}
+
+#define sceNetInetConnect(...) sceNetInetConnect_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNetInetSend(...) sceNetInetSend_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNetInetRecv(...) sceNetInetRecv_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNetInetSendmsg(...) sceNetInetSendmsg_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNetInetRecvmsg(...) sceNetInetRecvmsg_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNetInetShutdown(...) sceNetInetShutdown_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNetInetSocketAbort(...) sceNetInetSocketAbort_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNetInetClose(...) sceNetInetClose_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNetInetCloseWithRST(...) sceNetInetCloseWithRST_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNetInetTerm(...) sceNetInetTerm_PPSSPP_placeholder(__VA_ARGS__)
 
 void Register_sceNetInet();
 
