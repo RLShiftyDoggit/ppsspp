@@ -172,17 +172,14 @@ public:
 	// Host = Hostname:Port, or just Hostname.
 	std::string Host() const { return host_; }
 	int Port() const {
-		// FTB3's MUIS advertises the SVO base on HTTP/10060, while the secure
-		// account/SVO path is the companion HTTPS endpoint on 10061. Older shim
-		// code in sceHttp.cpp can otherwise rewrite an HTTPS FTB3 request back to
-		// plaintext 10060 before LegacyFTB3Client sees it. Normalize either FTB3
-		// HTTPS port form to the internal 10063 sentinel here, at the final port
-		// accessor used by sceHttp. LegacyFTB3Client converts 10063 to the real
-		// network endpoint 10061 and performs the SSLv3 transport.
-		if (protocol_ == "https" && (port_ == 10060 || port_ == 10061 || port_ == 10063) &&
-			resource_.rfind("/FTB3_XML/", 0) == 0) {
+		// Dedicated FTB3 compatibility branch: any HTTPS request carrying one of
+		// the SVO port forms must reach LegacyFTB3Client, regardless of the exact
+		// resource string. The earlier path-gated check could miss requests whose
+		// URL/path had already been transformed by the game before sceHttp saw it.
+		// 10063 is internal only; LegacyFTB3Client maps it to real network 10061.
+		const bool https = protocol_ == "https" || protocol_ == "HTTPS";
+		if (https && (port_ == 10060 || port_ == 10061 || port_ == 10063))
 			return 10063;
-		}
 		return port_;
 	}
 	std::string Protocol() const { return protocol_; }
