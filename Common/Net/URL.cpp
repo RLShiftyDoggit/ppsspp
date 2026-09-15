@@ -65,7 +65,10 @@ void Url::Split() {
 	// network endpoint 10061 before connect(). This also catches absolute request
 	// URLs, which bypass the connection object's inherited sentinel port.
 	if (protocol_ == "https" && port_ == 10061 && startsWithNoCase(resource_, "/FTB3_XML/")) {
-		NOTICE_LOG(Log::Net, "FTB3 legacy SSLv3 URL selected: %s:10061%s", host_.c_str(), resource_.c_str());
+		// ERROR level is intentional during the diagnostic pass: the user's current
+		// console filtering reliably shows this level, so selection cannot be hidden.
+		ERROR_LOG(Log::Net, "[FTB3 TRACE] Url::Split selected legacy HTTPS host=%s port=10061 resource=%s -> sentinel 10063",
+			host_.c_str(), resource_.c_str());
 		port_ = 10063;
 	}
 
@@ -223,7 +226,7 @@ std::string UriEncode(std::string_view sSrc) {
 		if (SAFE[*pSrc]) {
 			*pEnd++ = *pSrc;
 		} else {
-			// escape this char
+			// escape this char.
 			*pEnd++ = '%';
 			*pEnd++ = DEC2HEX[*pSrc >> 4];
 			*pEnd++ = DEC2HEX[*pSrc & 0x0F];
