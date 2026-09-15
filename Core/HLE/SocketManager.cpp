@@ -8,6 +8,30 @@
 SocketManager g_socketManager;
 static std::mutex g_socketMutex;  // TODO: Remove once the adhoc thread is gone
 
+static bool IsFTB3LegacyTLSPeer(SOCKET sock, int *peerPort) {
+	sockaddr_storage peer{};
+#if PPSSPP_PLATFORM(WINDOWS)
+	int peerLen = static_cast<int>(sizeof(peer));
+#else
+	socklen_t peerLen = static_cast<socklen_t>(sizeof(peer));
+#endif
+	if (getpeername(sock, reinterpret_cast<sockaddr *>(&peer), &peerLen) != 0)
+		return false;
+
+	int port = 0;
+	if (peer.ss_family == AF_INET) {
+		port = ntohs(reinterpret_cast<const sockaddr_in *>(&peer)->sin_port);
+	}
+#if defined(AF_INET6)
+	else if (peer.ss_family == AF_INET6) {
+		port = ntohs(reinterpret_cast<const sockaddr_in6 *>(&peer)->sin6_port);
+	}
+#endif
+	if (peerPort)
+		*peerPort = port;
+	return port == 10061;
+}
+
 InetSocket *SocketManager::CreateSocket(int *index, int *returned_errno, SocketState state, int domain, int type, int protocol) {
 	_dbg_assert_(state != SocketState::Unused);
 
@@ -42,7 +66,6 @@ InetSocket *SocketManager::CreateSocket(int *index, int *returned_errno, SocketS
 
 	ERROR_LOG(Log::sceNet, "Ran out of socket handles! This is BAD.");
 	closesocket(hostSock);
-	*index = 0;
 	*returned_errno = ENOMEM; // or something..
 	return nullptr;
 }
@@ -88,6 +111,17 @@ bool SocketManager::GetInetSocket(int sock, InetSocket **inetSocket) {
 		return false;
 	}
 	*inetSocket = inetSockets_ + sock;
+
+	// Diagnostic only: if FTB3 is bypassing sceHttp/LegacyFTB3Client and driving
+	// its TLS session through the PSP's raw sceNetInet socket API, every send/recv
+	// first passes through GetInetSocket(). Detect the already-connected 10061
+	// peer here at ERROR level so it remains visible with the user's current log
+	// filtering. No traffic is modified.
+	int peerPort = 0;
+	if (IsFTB3LegacyTLSPeer((*inetSocket)->sock, &peerPort)) {
+		ERROR_LOG(Log::sceNet, "[FTB3 RAW TRACE] PSP inet socket %d (host socket %llu) is connected to legacy TLS port %d",
+			sock, static_cast<unsigned long long>((*inetSocket)->sock), peerPort);
+	}
 	return true;
 }
 
