@@ -21,6 +21,8 @@
 #include <deque>
 #include <map>
 #include "Common/Log.h"
+#include "Common/StringUtils.h"
+#include "Core/Config.h"
 #include "Core/HLE/sceRtc.h"
 #include "Common/Net/HTTPClient.h"
 #include "Common/Net/Resolve.h"
@@ -59,8 +61,8 @@
 #define SCE_NP_AUTH_ERROR_UNKNOWN						0x80550480
 
 #define SCE_NP_MANAGER_ERROR_ALREADY_INITIALIZED		0x80550501
-#define SCE_NP_MANAGER_ERROR_NOT_INITIALIZED			0x80550502
-#define SCE_NP_MANAGER_ERROR_INVALID_ARGUMENT			0x80550503
+#define SCE_NP_MANAGER_ERROR_NOT_INITIALIZED				0x80550502
+#define SCE_NP_MANAGER_ERROR_INVALID_ARGUMENT				0x80550503
 #define SCE_NP_MANAGER_ERROR_OUT_OF_MEMORY				0x80550504
 #define SCE_NP_MANAGER_ERROR_INVALID_TICKET_SIZE		0x80550505
 #define SCE_NP_MANAGER_ERROR_INVALID_STATE				0x80550506
@@ -166,11 +168,11 @@
 // Based on https://gist.githubusercontent.com/raw/4140449/PS%20Vita (Might be slightly different with PSP?)
 #define SCE_NP_TROPHY_ERROR_UNKNOWN 						0x80551600
 #define SCE_NP_TROPHY_ERROR_NOT_INITIALIZED 				0x80551601
-#define SCE_NP_TROPHY_ERROR_ALREADY_INITIALIZED 			0x80551602
+#define SCE_NP_TROPHY_ERROR_ALREADY_INITIALIZED 				0x80551602
 #define SCE_NP_TROPHY_ERROR_NO_MEMORY 						0x80551603
 #define SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT 				0x80551604
 #define SCE_NP_TROPHY_ERROR_INSUFFICIENT_BUFFER				0x80551605
-#define SCE_NP_TROPHY_ERROR_EXCEEDS_MAX 					0x80551606
+#define SCE_NP_TROPHY_ERROR_EXCEEDS_MAX 				0x80551606
 #define SCE_NP_TROPHY_ERROR_ABORT 							0x80551607
 #define SCE_NP_TROPHY_ERROR_INVALID_HANDLE					0x80551608
 #define SCE_NP_TROPHY_ERROR_INVALID_CONTEXT					0x80551609
@@ -427,6 +429,7 @@ struct SceNpAuthMemoryStat {
 // Used by PSPNpSigninDialog.cpp
 extern int npSigninState;
 extern PSPTimeval npSigninTimestamp;
+extern std::string npOnlineId;
 
 // Used by sceNet.cpp since we're borrowing Apctl's PSPThread to process NP events & callbacks.
 // TODO: NP events should be processed on it's own PSPThread
@@ -434,6 +437,58 @@ extern std::recursive_mutex npAuthEvtMtx;
 
 // Used by sceNp2.cpp
 extern SceNpCommunicationId npTitleId;
+
+// FTB3 NP-core compatibility state.  Keep the existing PPSSPP online-id
+// behavior, but expose a real initialized/terminated lifecycle to FTB3 instead
+// of returning success while logging UNIMPL.
+struct FTB3NpCoreCompatState {
+	bool initialized = false;
+	bool onlineIdValid = false;
+	u32 generation = 0;
+};
+
+inline FTB3NpCoreCompatState g_ftb3NpCoreCompatState;
+
+static inline int sceNpInit() {
+	const u32 nextGeneration = g_ftb3NpCoreCompatState.generation + 1;
+	const std::string sanitized = SanitizeString(g_Config.sInfrastructureUsername,
+		StringRestriction::AlphaNumDashUnderscore, 3, 16);
+	if (g_Config.sInfrastructureUsername == sanitized)
+		npOnlineId = g_Config.sInfrastructureUsername;
+	else
+		npOnlineId.clear();
+
+	g_ftb3NpCoreCompatState.initialized = true;
+	g_ftb3NpCoreCompatState.onlineIdValid = !npOnlineId.empty();
+	g_ftb3NpCoreCompatState.generation = nextGeneration;
+
+	ERROR_LOG(Log::sceNet,
+		"[FTB3 NP] sceNpInit lifecycle created generation=%u onlineIdValid=%d onlineId=%s signInState=%d",
+		nextGeneration,
+		g_ftb3NpCoreCompatState.onlineIdValid ? 1 : 0,
+		npOnlineId.empty() ? "<empty>" : npOnlineId.c_str(),
+		npSigninState);
+	return 0;
+}
+
+static inline int sceNpTerm() {
+	ERROR_LOG(Log::sceNet,
+		"[FTB3 NP] sceNpTerm lifecycle ending initialized=%d generation=%u onlineIdValid=%d signInState=%d",
+		g_ftb3NpCoreCompatState.initialized ? 1 : 0,
+		g_ftb3NpCoreCompatState.generation,
+		g_ftb3NpCoreCompatState.onlineIdValid ? 1 : 0,
+		npSigninState);
+
+	npSigninState = NP_SIGNIN_STATUS_NONE;
+	g_ftb3NpCoreCompatState.initialized = false;
+	return 0;
+}
+
+// Rename PPSSPP's old core placeholders in sceNp.cpp.  The HLE registration
+// table uses bare identifiers, so it continues binding to the implementations
+// above rather than the renamed placeholder definitions.
+#define sceNpInit(...) sceNpInit_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNpTerm(...) sceNpTerm_PPSSPP_placeholder(__VA_ARGS__)
 
 // FTB3 NP-service compatibility state.  The original PPSSPP functions returned
 // success while discarding all three initialization parameters.  FTB3 supplies
