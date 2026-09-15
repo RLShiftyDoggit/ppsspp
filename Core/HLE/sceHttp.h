@@ -21,7 +21,6 @@
 #include "Common/Net/HTTPClient.h"
 #include "Common/Net/LegacyFTB3HTTPClient.h"
 
-// Based on https://docs.vitasdk.org/group__SceHttpUser.html
 #define 	SCE_HTTP_DEFAULT_RESOLVER_TIMEOUT   (1 * 1000 * 1000U)
 #define 	SCE_HTTP_DEFAULT_RESOLVER_RETRY   (5U)
 #define 	SCE_HTTP_DEFAULT_CONNECT_TIMEOUT   (30* 1000 * 1000U)
@@ -37,9 +36,6 @@
 #define 	SCE_HTTP_USERNAME_MAX_SIZE   256
 #define 	SCE_HTTP_PASSWORD_MAX_SIZE   256
 
-// If http isn't loaded (seems unlikely), most functions should return SCE_KERNEL_ERROR_LIBRARY_NOTFOUND
-
-// lib_http specific error codes, based on https://uofw.github.io/uofw/lib__http_8h_source.html, combined with https://github.com/vitasdk/vita-headers/blob/master/include/psp2/net/http.h
 enum SceHttpErrorCode {
 	SCE_HTTP_ERROR_BEFORE_INIT = 0x80431001,
 	SCE_HTTP_ERROR_NOT_SUPPORTED = 0x80431004,
@@ -47,7 +43,6 @@ enum SceHttpErrorCode {
 	SCE_HTTP_ERROR_BUSY = 0x80431021,
 	SCE_HTTP_ERROR_OUT_OF_MEMORY = 0x80431022,
 	SCE_HTTP_ERROR_NOT_FOUND = 0x80431025,
-
 	SCE_HTTP_ERROR_UNKNOWN_SCHEME = 0x80431061,
 	SCE_HTTP_ERROR_NETWORK = 0x80431063,
 	SCE_HTTP_ERROR_BAD_RESPONSE = 0x80431064,
@@ -67,17 +62,13 @@ enum SceHttpErrorCode {
 	SCE_HTTP_ERROR_BEFORE_COOKIE_LOAD = 0x80431078,
 	SCE_HTTP_ERROR_ABORTED = 0x80431080,
 	SCE_HTTP_ERROR_UNKNOWN = 0x80431081,
-
 	SCE_HTTP_ERROR_INVALID_ID = 0x80431100,
 	SCE_HTTP_ERROR_OUT_OF_SIZE = 0x80431104,
 	SCE_HTTP_ERROR_INVALID_VALUE = 0x804311FE,
-
 	SCE_HTTP_ERROR_PARSE_HTTP_NOT_FOUND = 0x80432025,
 	SCE_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE = 0x80432060,
 	SCE_HTTP_ERROR_PARSE_HTTP_INVALID_VALUE = 0x804321FE,
-
 	SCE_HTTP_ERROR_INVALID_URL = 0x80433060,
-
 	SCE_HTTP_ERROR_RESOLVER_EPACKET = 0x80436001,
 	SCE_HTTP_ERROR_RESOLVER_ENODNS = 0x80436002,
 	SCE_HTTP_ERROR_RESOLVER_ETIMEDOUT = 0x80436003,
@@ -90,7 +81,6 @@ enum SceHttpErrorCode {
 	SCE_HTTP_ERROR_RESOLVER_ENORECORD = 0x8043600A
 };
 
-// lib_https specific error codes, based on https://uofw.github.io/uofw/lib__https_8h_source.html, combined with https://github.com/vitasdk/vita-headers/blob/master/include/psp2/net/http.h
 enum SceHttpsErrorCode {
 	SCE_HTTPS_ERROR_OUT_OF_MEMORY = 0x80435022,
 	SCE_HTTPS_ERROR_CERT = 0x80435060,
@@ -100,14 +90,12 @@ enum SceHttpsErrorCode {
 	SCE_HTTPS_ERROR_PROXY = 0x80435064
 };
 
-// Could come in handy someday if we ever implement sceHttp* for real.
 enum PSPHttpMethod {
 	PSP_HTTP_METHOD_GET,
 	PSP_HTTP_METHOD_POST,
 	PSP_HTTP_METHOD_HEAD
 };
 
-// Based on https://github.com/vitasdk/vita-headers/blob/master/include/psp2/net/http.h
 enum SceHttpStatusCode {
 	SCE_HTTP_STATUS_CODE_CONTINUE = 100,
 	SCE_HTTP_STATUS_CODE_SWITCHING_PROTOCOLS = 101,
@@ -173,56 +161,46 @@ enum SceHttpAddHeaderMode {
 	SCE_HTTP_HEADER_ADD
 };
 
-
-// Just a holder for class names
 static const char* name_HTTPTemplate = "HTTPTemplate";
 static const char* name_HTTPConnection = "HTTPConnection";
 static const char* name_HTTPRequest = "HTTPRequest";
 
 class HTTPTemplate {
 protected:
-	std::string userAgent; // char userAgent[512];
+	std::string userAgent;
 	SceHttpVersion httpVer = SCE_HTTP_VERSION_1_0;
 	SceHttpProxyMode autoProxyConf = SCE_HTTP_PROXY_AUTO;
-
 	int useCookie = 0;
 	int useKeepAlive = 0;
 	int useCache = 0;
 	int useAuth = 0;
 	int useRedirect = 0;
-
 	u32 connectTimeout = SCE_HTTP_DEFAULT_CONNECT_TIMEOUT;
 	u32 sendTimeout = SCE_HTTP_DEFAULT_SEND_TIMEOUT;
 	u32 recvTimeout = SCE_HTTP_DEFAULT_RECV_TIMEOUT;
 	u32 resolveTimeout = SCE_HTTP_DEFAULT_RESOLVER_TIMEOUT;
 	int resolveRetryCount = SCE_HTTP_DEFAULT_RESOLVER_RETRY;
-
 	std::map<std::string, std::string> requestHeaders_;
 
 public:
 	HTTPTemplate() {}
 	HTTPTemplate(const char* userAgent, int httpVer, int autoProxyConf);
 	virtual ~HTTPTemplate() = default;
-
-	virtual const char* className() { return name_HTTPTemplate; } // to be more consistent, unlike typeid(v).name() which may varies among different compilers and requires RTTI
-
+	virtual const char* className() { return name_HTTPTemplate; }
 	const std::string getUserAgent() { return userAgent; }
 	int getHttpVer() { return httpVer; }
 	int getAutoProxyConf() { return autoProxyConf; }
-
 	u32 getConnectTimeout() { return connectTimeout; }
 	u32 getSendTimeout() { return sendTimeout; }
 	u32 getRecvTimeout() { return recvTimeout; }
 	u32 getResolveTimeout() { return resolveTimeout; }
 	int getResolveRetryCount() { return resolveRetryCount; }
-
 	void setUserAgent(const char* userAgent) { this->userAgent = userAgent ? userAgent : ""; }
 	void setConnectTimeout(u32 timeout) { this->connectTimeout = timeout; }
 	void setSendTimeout(u32 timeout) { this->sendTimeout = timeout; }
 	void setRecvTimeout(u32 timeout) { this->recvTimeout = timeout; }
 	void setResolveTimeout(u32 timeout) { this->resolveTimeout = timeout; }
 	void setResolveRetry(u32 retryCount) { this->resolveRetryCount = retryCount; }
-
 	int addRequestHeader(const char* name, const char* value, u32 mode);
 	int removeRequestHeader(const char* name);
 };
@@ -240,12 +218,6 @@ public:
 	HTTPConnection(int templateID, const char* hostString, const char* scheme, u32 port, int enableKeepalive);
 	virtual ~HTTPConnection() = default;
 
-	// The current sceHttp.cpp still contains the first-generation FTB3 plaintext
-	// 10061 -> 10060 rewrite. Preserve the game-visible HTTPS connection while
-	// using an internal sentinel port so that rewrite is bypassed. The specialized
-	// LegacyFTB3Client converts this sentinel back to the real network port 10061
-	// and performs an SSLv3/RSA/RC4-MD5 handshake there. Port 10063 is never used
-	// on the wire.
 	HTTPConnection& operator=(const HTTPConnection& other) {
 		if (this == &other)
 			return *this;
@@ -257,14 +229,18 @@ public:
 		port = other.port;
 		enableKeepalive = other.enableKeepalive;
 
-		if (scheme == "https" && port == 10061)
+		// FTB3's HTTPS endpoint is the SVO HTTP port + 1. Older shim code could
+		// leave the connection object carrying 10060 while the request still had an
+		// HTTPS scheme. Normalize either representation to the internal legacy-TLS
+		// sentinel so request dispatch cannot accidentally fall through to the old
+		// plaintext 10060 path.
+		if (scheme == "https" && (port == 10060 || port == 10061 || port == http::LegacyFTB3Client::kFTB3LegacySentinelPort))
 			port = http::LegacyFTB3Client::kFTB3LegacySentinelPort;
 
 		return *this;
 	}
 
 	virtual const char* className() override { return name_HTTPConnection; }
-
 	int getTemplateID() { return templateID; }
 	const std::string getHost() { return hostString; }
 	const std::string getScheme() { return scheme; }
@@ -272,9 +248,6 @@ public:
 	int getKeepAlive() { return enableKeepalive; }
 };
 
-// Absolute sceHttp request URLs bypass HTTPConnection::port in sceHttp.cpp.
-// Rewrite only FTB3's secure XML URL to the same internal sentinel so both
-// relative and absolute request creation paths reach the legacy transport.
 class FTB3RequestURL : public std::string {
 public:
 	using std::string::string;
@@ -282,10 +255,15 @@ public:
 	FTB3RequestURL& operator=(const char *value) {
 		std::string::operator=(value ? value : "");
 		if (rfind("https://", 0) == 0) {
-			const std::string marker = ":10061/FTB3_XML/";
-			const size_t pos = find(marker);
-			if (pos != npos)
-				replace(pos, 6, ":10063");
+			// Accept either form observed during shim development. HTTPS is the
+			// deciding signal; both are normalized to the internal TLS sentinel.
+			for (const std::string marker : { std::string(":10061/FTB3_XML/"), std::string(":10060/FTB3_XML/") }) {
+				const size_t pos = find(marker);
+				if (pos != npos) {
+					replace(pos, 6, ":10063");
+					break;
+				}
+			}
 		}
 		return *this;
 	}
@@ -297,15 +275,12 @@ private:
 	int method;
 	u64 contentLength;
 	FTB3RequestURL url;
-
 	u32 headerAddr_ = 0;
 	u32 headerSize_ = 0;
 	bool cancelled_ = false;
 	int responseCode_ = -1;
 	int entityLength_ = -1;
-
 	http::LegacyFTB3Client client;
-	//net::RequestProgress progress_(&cancelled_);
 	std::vector<std::string> responseHeaders_;
 	std::string httpLine_;
 	std::string responseContent_;
@@ -313,13 +288,10 @@ private:
 public:
 	HTTPRequest(int connectionID, int method, const char* url, u64 contentLength, net::ResolveFunc customResolver);
 	~HTTPRequest();
-
 	virtual const char* className() override { return name_HTTPRequest; }
-
 	void setInternalHeaderAddr(u32 addr) { headerAddr_ = addr; }
 	int getConnectionID() { return connectionID; }
 	int getResponseRemainingContentLength() { return (int)responseContent_.size(); }
-
 	int getResponseContentLength();
 	int abortRequest();
 	int getStatusCode();
@@ -328,8 +300,6 @@ public:
 	int sendRequest(u32 postDataPtr, u32 postDataSize);
 };
 
-
 void __HttpInit();
 void __HttpShutdown();
-
 void Register_sceHttp();
