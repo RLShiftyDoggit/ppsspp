@@ -272,12 +272,31 @@ public:
 	int getKeepAlive() { return enableKeepalive; }
 };
 
+// Absolute sceHttp request URLs bypass HTTPConnection::port in sceHttp.cpp.
+// Rewrite only FTB3's secure XML URL to the same internal sentinel so both
+// relative and absolute request creation paths reach the legacy transport.
+class FTB3RequestURL : public std::string {
+public:
+	using std::string::string;
+
+	FTB3RequestURL& operator=(const char *value) {
+		std::string::operator=(value ? value : "");
+		if (rfind("https://", 0) == 0) {
+			const std::string marker = ":10061/FTB3_XML/";
+			const size_t pos = find(marker);
+			if (pos != npos)
+				replace(pos, 6, ":10063");
+		}
+		return *this;
+	}
+};
+
 class HTTPRequest : public HTTPConnection {
 private:
 	int connectionID;
 	int method;
 	u64 contentLength;
-	std::string url;
+	FTB3RequestURL url;
 
 	u32 headerAddr_ = 0;
 	u32 headerSize_ = 0;
