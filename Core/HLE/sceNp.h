@@ -20,6 +20,7 @@
 #include <mutex>
 #include <deque>
 #include <map>
+#include "Common/Log.h"
 #include "Core/HLE/sceRtc.h"
 #include "Common/Net/HTTPClient.h"
 #include "Common/Net/Resolve.h"
@@ -179,7 +180,7 @@
 #define SCE_NP_BASIC_ERROR_BASE 							0x80551d00 
 #define SCE_NP_BASIC_ERROR_UNKNOWN							0x80551d01 
 #define SCE_NP_BASIC_ERROR_INVALID_ARGUMENT					0x80551d02 
-#define SCE_NP_BASIC_ERROR_OUT_OF_MEMORY 					0x80551d03 
+#define SCE_NP_BASIC_ERROR_OUT_OF_MEMORY 						0x80551d03 
 #define SCE_NP_BASIC_ERROR_NOT_INITIALIZED					0x80551d04 
 #define SCE_NP_BASIC_ERROR_ALREADY_INITIALIZED				0x80551d05 
 #define SCE_NP_BASIC_ERROR_SIGNED_OUT						0x80551d06 
@@ -433,6 +434,56 @@ extern std::recursive_mutex npAuthEvtMtx;
 
 // Used by sceNp2.cpp
 extern SceNpCommunicationId npTitleId;
+
+// FTB3 NP-service compatibility state.  The original PPSSPP functions returned
+// success while discarding all three initialization parameters.  FTB3 supplies
+// a real pool size, stack size and worker priority, so preserve that lifecycle
+// before attempting to emulate a worker thread.
+struct FTB3NpServiceCompatState {
+	bool initialized = false;
+	u32 poolSize = 0;
+	u32 stackSize = 0;
+	u32 threadPriority = 0;
+	u32 generation = 0;
+};
+
+inline FTB3NpServiceCompatState g_ftb3NpServiceCompatState;
+
+static inline int sceNpServiceInit(u32 poolSize, u32 stackSize, u32 threadPrio) {
+	const u32 nextGeneration = g_ftb3NpServiceCompatState.generation + 1;
+	g_ftb3NpServiceCompatState = {};
+	g_ftb3NpServiceCompatState.initialized = true;
+	g_ftb3NpServiceCompatState.poolSize = poolSize;
+	g_ftb3NpServiceCompatState.stackSize = stackSize;
+	g_ftb3NpServiceCompatState.threadPriority = threadPrio;
+	g_ftb3NpServiceCompatState.generation = nextGeneration;
+
+	ERROR_LOG(Log::sceNet,
+		"[FTB3 NP] sceNpServiceInit lifecycle created pool=%08x stack=%08x priority=%u generation=%u workerThread=not-created",
+		poolSize, stackSize, threadPrio, nextGeneration);
+	return 0;
+}
+
+static inline int sceNpServiceTerm() {
+	ERROR_LOG(Log::sceNet,
+		"[FTB3 NP] sceNpServiceTerm lifecycle ending initialized=%d pool=%08x stack=%08x priority=%u generation=%u",
+		g_ftb3NpServiceCompatState.initialized ? 1 : 0,
+		g_ftb3NpServiceCompatState.poolSize,
+		g_ftb3NpServiceCompatState.stackSize,
+		g_ftb3NpServiceCompatState.threadPriority,
+		g_ftb3NpServiceCompatState.generation);
+
+	const u32 generation = g_ftb3NpServiceCompatState.generation;
+	g_ftb3NpServiceCompatState = {};
+	g_ftb3NpServiceCompatState.generation = generation;
+	return 0;
+}
+
+// Keep PPSSPP's old placeholders in sceNp.cpp compiled under different names.
+// The HLE registration table uses bare function identifiers (not function calls),
+// so it binds to the implementations above rather than these renamed placeholders.
+#define sceNpServiceInit(...) sceNpServiceInit_PPSSPP_placeholder(__VA_ARGS__)
+#define sceNpServiceTerm(...) sceNpServiceTerm_PPSSPP_placeholder(__VA_ARGS__)
 
 void __NpInit();
 
