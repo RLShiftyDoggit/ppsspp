@@ -13,20 +13,26 @@
 namespace http {
 
 // FTB3-only HTTP client shim for the PPSSPP compatibility branch.
-// Port 10063 is an internal sentinel used by sceHttp to avoid the old
-// 10061 -> 10060 plaintext rewrite. It is never contacted on the network;
-// Resolve() converts it back to FTB3's real SSL endpoint on 10061.
+// Port 10063 is retained as an internal sentinel for the older routing code,
+// but the client also recognizes the real FTB3 HTTPS endpoint (10061)
+// directly. This matters because some FTB3 request forms reach sceHttp with a
+// resource string that does not match the old /FTB3_XML/ path test, leaving
+// the real port untouched. In that case the old code opened a raw/plain HTTP
+// socket to 10061, which the SSLv3 server quite correctly rejected.
 class LegacyFTB3Client : public Client {
 public:
 	explicit LegacyFTB3Client(net::ResolveFunc func) : Client(std::move(func)) {}
 
 	bool Resolve(const char *host, int port, net::DNSType type = net::DNSType::ANY) {
-		legacyFTB3_ = port == kFTB3LegacySentinelPort;
+		// Do not depend on the sentinel being present. FTB3's secure SVO endpoint
+		// is 10061, so selecting the legacy transport on the actual port is the
+		// authoritative path. The sentinel remains accepted for compatibility with
+		// earlier shim commits.
+		legacyFTB3_ = port == kFTB3LegacySentinelPort || port == kFTB3SSLPort;
 		const int networkPort = legacyFTB3_ ? kFTB3SSLPort : port;
 		if (legacyFTB3_) {
-			// Deliberately ERROR level for the current FTB3 diagnostic pass so this
-			// cannot disappear behind normal HTTP/Net log filtering.
-			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client::Resolve selected host=%s requestedPort=%d networkPort=%d",
+			ERROR_LOG(Log::sceNet,
+				"[FTB3 TLS] Legacy transport selected host=%s requestedPort=%d networkPort=%d",
 				host ? host : "", port, networkPort);
 		}
 		return Client::Resolve(host, networkPort, type);
@@ -34,26 +40,26 @@ public:
 
 	bool Connect(int maxTries = 2, double timeout = 20.0f, bool *cancelConnect = nullptr) {
 		if (legacyFTB3_) {
-			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client::Connect entering, target network port=%d", kFTB3SSLPort);
+			ERROR_LOG(Log::sceNet, "[FTB3 TLS] TCP connect starting on network port %d", kFTB3SSLPort);
 		}
 		if (!Client::Connect(maxTries, timeout, cancelConnect)) {
 			if (legacyFTB3_) {
-				ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client::Connect TCP connect failed before SSLv3 handshake");
+				ERROR_LOG(Log::sceNet, "[FTB3 TLS] TCP connect failed before SSLv3 handshake");
 			}
 			return false;
 		}
 		if (!legacyFTB3_)
 			return true;
 
-		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client TCP connected to port %d; starting SSLv3 handshake", kFTB3SSLPort);
+		ERROR_LOG(Log::sceNet, "[FTB3 TLS] TCP connected to %d; starting SSLv3 handshake", kFTB3SSLPort);
 		legacySSL_ = std::make_unique<net::LegacySSL3Client>(sock());
 		std::string error;
 		if (!legacySSL_->Handshake(&error)) {
-			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 handshake FAILED: %s", error.c_str());
+			ERROR_LOG(Log::sceNet, "[FTB3 TLS] SSLv3 handshake FAILED: %s", error.c_str());
 			legacySSL_.reset();
 			return false;
 		}
-		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 handshake COMPLETED");
+		ERROR_LOG(Log::sceNet, "[FTB3 TLS] SSLv3 handshake COMPLETED");
 		return true;
 	}
 
@@ -74,7 +80,7 @@ public:
 		if (progress)
 			progress->Update(0, 0, false);
 
-		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client HTTP request method=%s resource=%s bodyBytes=%zu",
+		ERROR_LOG(Log::sceNet, "[FTB3 TLS] encrypted HTTP request method=%s resource=%s bodyBytes=%zu",
 			method ? method : "", req.resource.c_str(), data.size());
 
 		std::string request;
@@ -98,10 +104,10 @@ public:
 
 		std::string error;
 		if (!legacySSL_->WriteApplicationData(request, &error)) {
-			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 HTTP write FAILED: %s", error.c_str());
+			ERROR_LOG(Log::sceNet, "[FTB3 TLS] encrypted HTTP write FAILED: %s", error.c_str());
 			return -1;
 		}
-		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 HTTP write completed");
+		ERROR_LOG(Log::sceNet, "[FTB3 TLS] encrypted HTTP write completed");
 
 		responseReady_ = false;
 		responseBody_.clear();
@@ -117,14 +123,14 @@ public:
 		std::string plaintext;
 		std::string error;
 		if (!legacySSL_->ReadApplicationData(&plaintext, &error)) {
-			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client SSLv3 HTTP read FAILED: %s", error.c_str());
+			ERROR_LOG(Log::sceNet, "[FTB3 TLS] encrypted HTTP read FAILED: %s", error.c_str());
 			return -1;
 		}
-		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client received %zu decrypted HTTP byte(s)", plaintext.size());
+		ERROR_LOG(Log::sceNet, "[FTB3 TLS] received %zu decrypted HTTP byte(s)", plaintext.size());
 
 		const size_t headerEnd = plaintext.find("\r\n\r\n");
 		if (headerEnd == std::string::npos) {
-			ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client response did not contain a complete HTTP header block");
+			ERROR_LOG(Log::sceNet, "[FTB3 TLS] response did not contain a complete HTTP header block");
 			return -1;
 		}
 
@@ -138,7 +144,7 @@ public:
 		if (statusLine)
 			*statusLine = firstLine;
 
-		ERROR_LOG(Log::sceNet, "[FTB3 TRACE] LegacyFTB3Client HTTP status line: %s", firstLine.c_str());
+		ERROR_LOG(Log::sceNet, "[FTB3 TLS] HTTP status line: %s", firstLine.c_str());
 
 		const size_t firstSpace = firstLine.find(' ');
 		if (firstSpace == std::string::npos) {
